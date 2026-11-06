@@ -160,8 +160,11 @@ exclusive = false
 
 [triage]
 # Any OpenAI-compatible chat endpoint (Ollama, vLLM, llama.cpp, LM Studio, ...).
+# Gateway-specific headers belong only in host [defaults.triage.headers] or
+# [repo."owner/name".triage.headers], with the URL in that same host triage table.
 # url = "http://127.0.0.1:11434/v1/chat/completions"
 # model = "qwen3:30b"
+# api = "openai"      # or "anthropic", with a complete /v1/messages URL
 # timeout = 60         # seconds per model request; raise for slow local models
 # service = "my-model.service"  # opt in to a two-minute liveness timer installed by `factory install`
 

@@ -119,7 +119,7 @@ KNOWN_KEYS = {
     "eval": ("max_cases", "max_tokens", "budget_min", "profile", "schedule"),
     "gate": ("timeout", "lock", "check", "protected_paths", "add_only_paths"),
     "leak_scan": ("pattern", "exclude", "extra"),
-    "triage": ("url", "model", "key", "timeout", "service"),
+    "triage": ("url", "model", "key", "headers", "api", "timeout", "service"),
     "investigation": ("enabled", "allow_export", "url", "model", "key", "allow_loopback_http",
                       "max_input_bytes", "max_output_tokens", "token_budget", "timeout", "max_requests", "send_store_false", "allow_shared_model_key"),
     "publisher": ("enabled", "allow_publish", "key", "login", "kind", "timeout", "request_timeout", "max_requests", "max_response_bytes", "status_file", "status_uid"),
@@ -376,7 +376,9 @@ class Config:
     leak_exclude: list[str] = field(default_factory=list)
     llm_url: str = DEFAULT_LLM_URL
     llm_model: str = DEFAULT_LLM_MODEL
+    llm_api: str = "openai"
     llm_key: str = ""  # bearer token for a gated endpoint (e.g. LiteLLM); host config only, never committed
+    llm_headers: dict[str, str] = field(default_factory=dict, repr=False)
     investigation: dict = field(default_factory=dict, repr=False)  # host-only model role
     publisher: dict = field(default_factory=dict, repr=False)  # host-only dedicated publication role
     triage_timeout: int = 60  # seconds per triage model request
@@ -1005,7 +1007,29 @@ def load(start: Path | None = None, *, worktree: bool = False) -> Config:
         cfg.leak_pattern = "|".join(p for p in (cfg.leak_pattern, *terms) if p)
     cfg.llm_url = triage.get("url", cfg.llm_url)
     cfg.llm_model = triage.get("model", cfg.llm_model)
+    cfg.llm_api = triage.get("api", "openai")
+    if cfg.llm_api not in ("openai", "anthropic"):
+        raise ConfigError("triage.api must be openai or anthropic")
     cfg.llm_key = str(triage.get("key", cfg.llm_key))
+    committed_triage = raw_repo.get("triage", {})
+    if "headers" in committed_triage:
+        raise ConfigError("triage.headers is host-only")
+    headers = triage.get("headers", {})
+    if not isinstance(headers, dict):
+        raise ConfigError("triage.headers must map HTTP header names to text")
+    names = set()
+    reserved = {"host", "content-length", "content-type", "transfer-encoding", "connection",
+                "proxy-authorization", "proxy-connection", "upgrade", "trailer", "te", "expect", "keep-alive"}
+    for name, value in headers.items():
+        if (not re.fullmatch(r"[!#$%&'*+.^_`|~0-9A-Za-z-]+", name)
+                or name.lower() in reserved or name.lower() in names
+                or not isinstance(value, str)
+                or any(ord(char) < 32 or ord(char) > 126 for char in value)):
+            raise ConfigError("triage.headers contains an invalid, duplicate or reserved header")
+        names.add(name.lower())
+    if headers and "url" in committed_triage:
+        raise ConfigError("triage.url must be host-only when triage.headers is configured")
+    cfg.llm_headers = dict(headers)
     cfg.triage_timeout = int(triage.get("timeout", cfg.triage_timeout))
     service = triage.get("service")
     if service is not None and (
