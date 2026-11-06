@@ -16,7 +16,7 @@ from unittest.mock import MagicMock, patch
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from factory import config, onboard
+from factory import config, onboard, triage
 
 
 class DashboardPortTest(unittest.TestCase):
@@ -93,7 +93,7 @@ class DashboardPortTest(unittest.TestCase):
                 patch.object(onboard.config, "host_config_path", return_value=self.host_path), \
                 patch.object(onboard, "sh", side_effect=command), \
                 patch.object(onboard.shutil, "which", return_value="/bin/tool"), \
-                patch.object(onboard.urllib.request, "urlopen", return_value=MagicMock()), \
+                patch.object(triage.urllib.request, "urlopen", return_value=MagicMock()), \
                 redirect_stdout(output):
             code = onboard.doctor([] if text else ["--json"])
         return code, output.getvalue(), calls

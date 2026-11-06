@@ -15,7 +15,7 @@ from unittest import mock
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from factory import config, dispatch, onboard
+from factory import config, dispatch, onboard, triage
 
 # Records what a child sees: GitHub token variables, GH_CONFIG_DIR and its contents.
 PROBE = (
@@ -183,7 +183,7 @@ class DoctorIdentityTest(unittest.TestCase):
                     mock.patch.object(onboard, "gh_login", side_effect=login), \
                     mock.patch.object(onboard, "_dashboard_port_check", return_value=(True, "")), \
                     mock.patch.object(onboard.shutil, "which", return_value="/bin/tool"), \
-                    mock.patch.object(onboard.urllib.request, "urlopen", return_value=mock.MagicMock()), \
+                    mock.patch.object(triage.urllib.request, "urlopen", return_value=mock.MagicMock()), \
                     mock.patch.dict(os.environ), redirect_stdout(output):
                 os.environ.pop("GH_CONFIG_DIR", None)
                 code = onboard.doctor(["--json"])
