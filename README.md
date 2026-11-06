@@ -1203,6 +1203,40 @@ snapshot. Factory leaves this metadata opaque and out of pipeline configuration;
 `doctor` accepts it only under `defaults`. Unknown tables and an `engine` table
 under a per-repository section still produce host-config warnings.
 
+Gateway-specific triage headers are host-only. Configure them under
+`[defaults.triage.headers]` or `[repo."owner/name".triage.headers]` in that
+private host file, using the gateway's documented header names. For example:
+
+```toml
+[repo."acme/widgets".triage]
+url = "https://gateway.example.invalid/v1/chat/completions"
+model = "example-model"
+
+[repo."acme/widgets".triage.headers]
+X-Application-Key = "<application-key>"
+user = "<calling-user>"
+```
+
+Keep credential values out of repository configuration and logs. When headers
+are configured, the endpoint URL must also come from host configuration;
+a repository cannot override it. Header names are case-insensitive, duplicate
+names and transport/framing headers are rejected, and values must be printable
+ASCII. Custom `Authorization` overrides the existing `triage.key` bearer header.
+The same headers apply to model calls, doctor/liveness probes and dashboard
+availability checks. Requests carrying custom headers refuse HTTP redirects;
+probe diagnostics omit provider response bodies. This configures authentication,
+not an automatic choice of protocol. The default `triage.api = "openai"`
+uses Chat Completions. For an Anthropic Messages endpoint, set `api = "anthropic"`
+and its complete `/v1/messages` URL in the same triage table. Factory moves system
+messages to the native `system` field, supplies `max_tokens = 4096` and the
+`anthropic-version: 2023-06-01` header, reads text blocks and records native usage
+(including cache tokens). Cache-write tokens count as input for existing cost
+estimates; provider-specific cache-write premiums are not modeled. With this API, `triage.key`/`FACTORY_LLM_KEY` supplies
+`x-api-key` instead of bearer authorization. Custom headers override these
+defaults. Model-list probes use the sibling `/v1/models` endpoint.
+Anthropic environment variables are not automatically read by this client.
+No additional HTTP library is required.
+
 `[worker_wrap]` is host-only: set `command` under `[defaults.worker_wrap]` or
 `[repo."owner/name".worker_wrap]` (per-repo wins). Its argv is prepended to
 every worker launch, whichever `[workers]` label is selected, including labels

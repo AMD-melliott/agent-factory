@@ -14,6 +14,7 @@ import time
 import urllib.error
 import urllib.request
 import webbrowser
+from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 from urllib.parse import urlparse
@@ -721,12 +722,13 @@ def metrics(tickets: list[dict], *, escape_tickets: set[int] | None = None) -> d
 
 
 def triage_llm_online() -> bool:
-    base = LLM_URL.rsplit("/chat/completions", 1)[0]
-    req = urllib.request.Request(f"{base}/models")
-    if LLM_KEY:
-        req.add_header("Authorization", f"Bearer {LLM_KEY}")
+    from factory import triage
+    endpoint_cfg = replace(cfg, llm_url=LLM_URL)
+    req = urllib.request.Request(triage.models_url(endpoint_cfg))
+    for name, value in triage.request_headers(cfg, LLM_KEY).items():
+        req.add_header(name, value)
     try:
-        with urllib.request.urlopen(req, timeout=1.5) as resp:
+        with triage.open_request(req, timeout=1.5, authenticated=bool(cfg.llm_headers or (cfg.llm_api == "anthropic" and LLM_KEY))) as resp:
             return resp.status == 200
     except (urllib.error.URLError, OSError, ValueError):
         return False

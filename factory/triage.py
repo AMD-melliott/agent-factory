@@ -54,18 +54,45 @@ def configure(c: Config) -> None:
     LLM_KEY = os.environ.get("FACTORY_LLM_KEY", cfg.llm_key)
 
 
+def request_headers(c: Config, key: str, *, content: bool = False) -> dict[str, str]:
+    headers = {"content-type": "application/json"} if content else {}
+    if c.llm_api == "anthropic":
+        headers["anthropic-version"] = "2023-06-01"
+        if key:
+            headers["x-api-key"] = key
+    elif key:
+        headers["authorization"] = f"Bearer {key}"
+    headers.update({name.lower(): value for name, value in c.llm_headers.items()})
+    return headers
+
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, *args, **kwargs):
+        return None
+
+
+def open_request(request, *, timeout: float, authenticated: bool = False):
+    # urllib otherwise forwards arbitrary gateway credentials to redirect targets.
+    if authenticated:
+        return urllib.request.build_opener(_NoRedirect()).open(request, timeout=timeout)
+    return urllib.request.urlopen(request, timeout=timeout)
+
+
 def models_url(c: Config) -> str:
-    return f"{c.llm_url.rsplit('/chat/completions', 1)[0].rstrip('/')}/models"
+    suffix = "/messages" if c.llm_api == "anthropic" else "/chat/completions"
+    return f"{c.llm_url.rsplit(suffix, 1)[0].rstrip('/')}/models"
 
 
 def probe_endpoint(c: Config, *, opener=None) -> tuple[bool, str]:
     endpoint = models_url(c)
-    opener = opener or urllib.request.urlopen
     key = os.environ.get("FACTORY_LLM_KEY", c.llm_key)
     # A gated endpoint (e.g. LiteLLM) answers 401 without the key: that is not a dead model.
-    target = urllib.request.Request(endpoint, headers={"Authorization": f"Bearer {key}"}) if key else endpoint
+    headers = request_headers(c, key)
+    target = urllib.request.Request(endpoint, headers=headers) if headers else endpoint
     try:
-        with opener(target, timeout=PROBE_TIMEOUT):
+        response = (opener(target, timeout=PROBE_TIMEOUT) if opener else
+                    open_request(target, timeout=PROBE_TIMEOUT, authenticated=bool(c.llm_headers or (c.llm_api == "anthropic" and key))))
+        with response:
             return True, "ready"
     except urllib.error.HTTPError as exc:
         try:
@@ -74,9 +101,9 @@ def probe_endpoint(c: Config, *, opener=None) -> tuple[bool, str]:
             exc.close()
         if exc.code == 503 and "loading model" in detail.casefold():
             return True, "loading model"
-        return False, f"HTTP {exc.code}: {detail}"
+        return False, f"HTTP {exc.code}" if c.llm_headers or c.llm_api == "anthropic" else f"HTTP {exc.code}: {detail}"
     except (urllib.error.URLError, OSError, TimeoutError, ValueError) as exc:
-        return False, f"{type(exc).__name__}: {exc}"
+        return False, type(exc).__name__ if c.llm_headers or c.llm_api == "anthropic" else f"{type(exc).__name__}: {exc}"
 
 
 def _probe_state(path) -> dict:
@@ -390,23 +417,23 @@ class EndpointTimeout(SystemExit):
 
 def call_llm(messages: list[dict], execution=None) -> str:
     started = time.monotonic()
-    payload = json.dumps(
-        {
-            "model": LLM_MODEL,
-            "messages": messages,
-            "temperature": 0.1,
-        }
-    ).encode()
-    headers = {"Content-Type": "application/json"}
-    if LLM_KEY:
-        headers["Authorization"] = f"Bearer {LLM_KEY}"
+    data = {"model": LLM_MODEL, "messages": messages, "temperature": 0.1}
+    if cfg.llm_api == "anthropic":
+        data["messages"] = [row for row in messages if row["role"] != "system"]
+        system = "\n\n".join(row["content"] for row in messages if row["role"] == "system")
+        if system:
+            data["system"] = system
+        data["max_tokens"] = 4096
+    payload = json.dumps(data).encode()
+    headers = request_headers(cfg, LLM_KEY, content=True)
     req = urllib.request.Request(
         LLM_URL,
         data=payload,
         headers=headers,
     )
     try:
-        with urllib.request.urlopen(req, timeout=cfg.triage_timeout) as resp:
+        authenticated = bool(cfg.llm_headers or (cfg.llm_api == "anthropic" and LLM_KEY))
+        with open_request(req, timeout=cfg.triage_timeout, authenticated=authenticated) as resp:
             body = json.load(resp)
     except (urllib.error.URLError, OSError, TimeoutError) as exc:
         timed_out = isinstance(exc, TimeoutError) or (
@@ -424,13 +451,31 @@ def call_llm(messages: list[dict], execution=None) -> str:
                 file=sys.stderr,
             )
         else:
+            detail = type(exc).__name__ if cfg.llm_headers or cfg.llm_api == "anthropic" else str(exc)
             print(
-                f"cannot reach local model at {LLM_URL}: {exc}\n"
+                f"cannot reach local model at {LLM_URL}: {detail}\n"
                 "Is the model server running? Set [triage].url in .factory.toml if the endpoint differs.",
                 file=sys.stderr,
             )
         # URLError(TimeoutError) is a connect timeout (endpoint unreachable); a bare one is a slow model.
         raise (EndpointTimeout if isinstance(exc, TimeoutError) else SystemExit)(2) from exc
+    if cfg.llm_api == "anthropic":
+        try:
+            body_stop = body.get("stop_reason")
+            content = "\n".join(row["text"] for row in body["content"] if row.get("type") == "text")
+            reported = body.get("usage", {})
+            fields = [reported.get(name) if name in ("input_tokens", "output_tokens") else reported.get(name, 0) for name in
+                      ("input_tokens", "output_tokens", "cache_read_input_tokens", "cache_creation_input_tokens")]
+            body = {"choices": [{"message": {"content": content}}]}
+            if all(type(value) is int and value >= 0 for value in fields):
+                incoming, outgoing, cached, created = fields
+                body["usage"] = {"prompt_tokens": incoming + cached + created, "completion_tokens": outgoing,
+                                 "prompt_tokens_details": {"cached_tokens": cached}}
+            if not content or body_stop == "max_tokens":
+                raise ValueError("incomplete response")
+        except (KeyError, TypeError, AttributeError, ValueError):
+            print("invalid or incomplete Anthropic triage response", file=sys.stderr)
+            raise SystemExit(2) from None
     usage = _usage_fields(body)
     _record_usage(execution, usage)
     cost = None
