@@ -5,14 +5,14 @@ import io
 import json
 import tempfile
 import threading
-from http.server import BaseHTTPRequestHandler, HTTPServer
 import unittest
 import urllib.error
+from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from unittest import mock
 
-from tests.test_factory import make_repo
 from factory import config, dashboard, triage
+from tests.test_factory import make_repo
 
 
 class TriageHeadersTest(unittest.TestCase):
