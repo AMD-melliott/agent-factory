@@ -1,6 +1,7 @@
 # Changelog
 
 ## Unreleased
+- Ticket and learning review prompts are tool-free: they cite only the inline base standards, untrusted diff, issue text or learning proposal, and gate report, never `./snapshot` or `./review.diff`. Reviewer output with tool-call markup outside fenced blocks and inline code spans is rejected with reason `tool_call_markup` and retried (#90).
 - Triage supports an explicit Anthropic Messages API option and host-only gateway HTTP headers for model calls, doctor/liveness probes and dashboard checks. Repository endpoint overrides are refused when host headers are configured; authenticated redirects and provider-body diagnostics are suppressed.
 - Reviewer calibration model replay resolves the git HEAD contract only when it runs the default matrix runner, so injected runners work in copies without a `.git` directory (the mutation-tier baseline copy).
 - Fork: `scripts/privacy-check.py --range` also checks each commit's author and committer identity (`%an <%ae>`, `%cn <%ce>`) against the same rules, reporting `commit <sha> author` or `commit <sha> committer`. Commits reachable from `--published` are skipped for identities too; merge commits GitHub creates at merge time are out of scope (#78).
