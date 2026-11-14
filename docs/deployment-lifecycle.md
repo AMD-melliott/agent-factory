@@ -64,6 +64,31 @@ backend_key = "shared_state"
 adapter = "terraform"
 ```
 
+* `watch_paths`: optional list of extra paths whose changes also make a merge a member of the
+  target (default empty: only `dir` counts). Use it for image-built targets, where an adapter
+  builds the image from the merged tree, so a merge that only fixes the `Dockerfile` or the
+  application code still deploys instead of needing a placeholder edit inside `dir`:
+
+  ```toml
+  [apply.targets.web]
+  dir = "deploy/web"                      # the job/manifest the adapter applies
+  adapter = "image-build"                 # an external adapter that builds from the merged tree
+  watch_paths = ["Dockerfile", "app/**"]  # image inputs
+  ```
+
+  Each entry is a git `glob` pathspec relative to the repository root, matched against the
+  paths `git diff --name-only` reports for the merge: `*` and `?` match within one path
+  segment (`app/*` matches `app/main.py`, not `app/api/main.py`), `**` crosses directories
+  (`app/**`, `**/Dockerfile`), and a plain directory name (`app`) matches everything below it.
+  Entries must be non-empty strings with no leading `/`, no `..` segment and no `:` pathspec
+  magic; anything else is a config error. Membership is one rule everywhere: candidate
+  selection, `--authorize-revision`, unauthorized direct-merge detection and the
+  `factory inspect --candidates` preview all count a merge that touches `dir` **or** a watch
+  path, so a watch-path-only merge needs the same human review or operator approval as a
+  change to `dir`. Patterns may overlap another target's `dir` or `watch_paths` (several images
+  can share a base `Dockerfile`); such a merge is then a candidate on each of those targets, as
+  a merge touching two target directories is. The single-target form takes
+  `[apply].watch_paths`; with `[apply.targets]` set it on each target.
 * `backend_key`: Serializes deployment across multiple targets that share a common state backend (e.g. shared S3 state lock or Consul cluster), preventing overlapping apply passes.
 * `adapter`: Pluggable deployment adapter (`"terraform"`, `"fake"`, etc.). An enabled target naming an adapter that is not registered stops the whole `factory apply` pass before any lock, fetch or deployment; it never falls back to Terraform.
 * `supersession`: how a target treats several pending approved revisions. Set it in `[apply]`
@@ -197,7 +222,7 @@ Legacy events (`applied` with `ok=true`/`ok=false`, `apply-escalate`) are parsed
 ## Safety Guarantees
 
 1. **Revision-Bound Human Approval:** Merged PRs require `reviewDecision == "APPROVED"` plus an APPROVED review from a trusted human (OWNER/MEMBER/COLLABORATOR, excluding bots) at the exact head SHA, selected from `latestReviews(first:20)`. Dispatch merge applies the same check (`deploy.verify_revision_authorization`) to the PR's current head on apply-enabled repos, at listing and at both re-reads before `gh pr merge --match-head-commit`: GitHub keeps `reviewDecision` APPROVED after a push, so a stale approval waits for a fresh one instead of merging a head apply would reject. A refreshed (rebased) PR needs re-approval for the same reason. Review evidence comes from GraphQL `latestReviews { commit { oid } }`: `gh pr view --json latestReviews` returns an empty `commit.oid`, which this check cannot use. `trusted_reviewers` has no configuration wiring. This gate is load-bearing where branch protection is unavailable (a private repository on a plan without it, or protection not configured): GitHub then lets any writer merge, and the factory's own check is the only thing standing between a merge and a deploy, so it remains enforced at merge and again at apply. If review approval was on commit $A$ but an unapproved commit $B$ was merged, the deployment is rejected and escalated.
-2. **Unauthorized Direct Merge Refusal:** Any commit directly pushed or merged to `main` touching a target directory without an approved PR is flagged. `agent-factory` records a `deploy_unauthorized` audit event and halts execution for that target.
+2. **Unauthorized Direct Merge Refusal:** Any commit directly pushed or merged to `main` touching a target directory (or one of its `watch_paths`) without an approved PR is flagged. `agent-factory` records a `deploy_unauthorized` audit event and halts execution for that target.
 3. **Topological Git Ordering:** Deployments are executed strictly in topological git commit order along `main`.
 4. **Idempotency & Notification Failure Isolation:** Durable disk recording (`deploy_run` with terminal status) occurs **before** GitHub notification posting. If GitHub API is down or fails, the deployment is never duplicate-executed on subsequent passes.
 

@@ -662,10 +662,22 @@ def is_ancestor(ancestor: str, descendant: str, root: Path) -> bool:
     return proc.returncode == 0
 
 
-def touches_target_dir(commit: str, target_dir: str, root: Path) -> bool:
-    """Check if commit touches target_dir."""
+def target_pathspecs(target_dir: str, watch_paths: tuple[str, ...] | list[str] = ()) -> list[str]:
+    """Git pathspecs deciding which commits belong to a deploy target.
+
+    The one membership rule: a commit belongs to a target when it changes a file
+    under the target's `dir` or a file matching any of its `watch_paths`. Each
+    watch path is a git `glob` pathspec anchored at the repository root: `*`
+    and `?` stay within one path segment, `**` crosses directories, and a plain
+    directory name matches everything beneath it."""
+    return [target_dir, *(f":(top,glob){pattern}" for pattern in watch_paths)]
+
+
+def touches_target_dir(commit: str, target_dir: str, root: Path,
+                       watch_paths: tuple[str, ...] | list[str] = ()) -> bool:
+    """Check if commit touches target_dir or any of its watch_paths."""
     proc = subprocess.run(
-        ["git", "diff", "--name-only", f"{commit}~1", commit, "--", target_dir],
+        ["git", "diff", "--name-only", f"{commit}~1", commit, "--", *target_pathspecs(target_dir, watch_paths)],
         cwd=root, capture_output=True, text=True, check=False,
     )
     return bool(proc.stdout.strip())
@@ -677,8 +689,10 @@ def find_unauthorized_direct_merges(
     root: Path,
     since_commit: str | None = None,
     main_branch: str = "main",
+    watch_paths: tuple[str, ...] | list[str] = (),
 ) -> list[str]:
-    """Find commits on main touching target_dir that were not merged via an authorized PR."""
+    """Find commits on main touching target_dir (or its watch_paths) that were
+    not merged via an authorized PR."""
     ref = resolve_main_ref(root, main_branch)
     rev_range = f"{since_commit}..{ref}" if since_commit else ref
 
@@ -704,7 +718,7 @@ def find_unauthorized_direct_merges(
                             expanded_authorized.add(c_cov)
 
     proc = subprocess.run(
-        ["git", "log", "--min-parents=1", "--format=%H", rev_range, "--", target_dir],
+        ["git", "log", "--min-parents=1", "--format=%H", rev_range, "--", *target_pathspecs(target_dir, watch_paths)],
         cwd=root, capture_output=True, text=True, check=False,
     )
     if proc.returncode != 0 or not proc.stdout.strip():
@@ -828,13 +842,14 @@ def select_candidates_for_target(
     repo: str = "",
     fetch_evidence_fn: Any = None,
     approvals: dict[int, dict[str, dict]] | None = None,
+    watch_paths: tuple[str, ...] | list[str] = (),
 ) -> tuple[list[dict], list[str]]:
     """Select, filter, and order deployment candidates for a target.
 
     Enforces:
     - Target state checks (interrupted runs or unreconciled failures block selection).
     - Adoption baseline filtering.
-    - Direct merge detection on main touching target_dir.
+    - Direct merge detection on main touching target_dir or its watch_paths.
     - Revision authorization verification: a trusted human review of the merged
       head, or a recorded operator approval of that exact head (`approvals`,
       read from the journal when not given).
@@ -849,7 +864,7 @@ def select_candidates_for_target(
     if supersession in HALTING_MODES and tstate.unacknowledged_failed_tickets:
         return [], []
 
-    check_touches = touches_fn or (lambda c: touches_target_dir(c, target_dir, root))
+    check_touches = touches_fn or (lambda c: touches_target_dir(c, target_dir, root, watch_paths))
 
     def approval_for(pr: dict) -> dict | None:
         nonlocal approvals
@@ -907,6 +922,7 @@ def select_candidates_for_target(
         root=root,
         since_commit=since,
         main_branch=main_branch,
+        watch_paths=watch_paths,
     )
     if unauthorized:
         return [], unauthorized

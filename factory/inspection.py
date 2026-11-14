@@ -368,7 +368,7 @@ def candidate_snapshot(cfg: config.Config, ledger: dict) -> dict:
                     raise ValueError
                 if ticket in terminal or before_baseline(cfg, pr["number"], commit):
                     continue
-                files = command(["git", "--no-optional-locks", "diff-tree", "--root", "--no-commit-id", "--name-only", "-r", "-m", commit, "--", target.dir], cwd=cfg.root)
+                files = command(["git", "--no-optional-locks", "diff-tree", "--root", "--no-commit-id", "--name-only", "-r", "-m", commit, "--", *deploy.target_pathspecs(target.dir, target.watch_paths)], cwd=cfg.root)
                 if files.strip():
                     output.append({"target": name, "ticket": ticket, "pr": pr["number"], "commit": commit})
         return {"status": "observed", "coverage": "truncated" if len(prs) >= 1000 else "complete_query",
@@ -389,7 +389,8 @@ def inspect(cfg: config.Config, *, live: bool = False, candidates: bool = False,
     result = {"schema_version": 1, "repo": cfg.repo, "config_path": str(config.host_config_path()),
               "observer_python": sys.executable, "required_units": sorted(verify_secrets.required_units(cfg)),
               "configured_targets": [{"target": name, "enabled": target.enabled,
-                                      "directory": target.dir, "adapter": target.adapter}
+                                      "directory": target.dir, "watch_paths": list(target.watch_paths),
+                                      "adapter": target.adapter}
                                      for name, target in sorted(cfg.targets.items())],
               "units": units, "credentials": verify_secrets.credential_rows(cfg, "all", live),
               "deployment": ledger, "incidents": incidents.snapshot(cfg.factory), "incident_routing": investigation_routing.snapshot(cfg.factory), "investigations": investigation_model.snapshot(cfg), "investigation_outbox": investigation_outbox.snapshot(cfg), "publisher_status": publisher_status.observe(cfg), "locks": locks(cfg, lock_dirs),
