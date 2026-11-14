@@ -132,7 +132,7 @@ KNOWN_KEYS = {
     "dashboard": ("port", "theme"),
     "install": ("every", "dashboard", "host", "python", "env", "dispatch_env", "apply"),
     "apply": ("enabled", "dir", "env", "targets", "baseline", "supersession", "adapter", "verify", "diagnostics",
-              "credential_warn_hours", "github_logins"),
+              "credential_warn_hours", "github_logins", "watch_paths"),
     "collaboration": ("fallback", "reasons", "components"),
     "prices": None,
 }
@@ -175,6 +175,9 @@ class DeployTarget:
     verify: VerifyPolicy | None = None
     diagnostics: dict | None = None
     supersession: str = ""  # overrides [apply].supersession for this target when set
+    # Extra root-relative git glob pathspecs whose changes also make a commit a
+    # member of this target (e.g. the Dockerfile of an image-built target).
+    watch_paths: tuple[str, ...] = ()
 
 
 @dataclass
@@ -212,6 +215,31 @@ def supersession_mode(value: object, where: str) -> str:
     if value not in SUPERSESSION_MODES:
         raise ConfigError(f"{where} must be one of {', '.join(SUPERSESSION_MODES)}")
     return str(value)
+
+
+def watch_paths(value: object, where: str) -> tuple[str, ...]:
+    """A target's `watch_paths`: repository-relative glob patterns, matched by
+    git as `:(top,glob)` pathspecs (see `deploy.target_pathspecs`). Patterns may
+    overlap another target's dir or watch_paths: a shared input such as a base
+    Dockerfile legitimately makes one merge a candidate on several targets."""
+    if value is None:
+        return ()
+    if not isinstance(value, list):
+        raise ConfigError(f"{where} must be a list of path patterns")
+    patterns = []
+    for pattern in value:
+        if not isinstance(pattern, str) or not pattern.strip():
+            raise ConfigError(f"{where} entries must be non-empty strings")
+        if pattern != pattern.strip():
+            raise ConfigError(f"{where} entry {pattern!r} has leading or trailing whitespace")
+        if pattern.startswith("/"):
+            raise ConfigError(f"{where} entry {pattern!r} must be relative to the repository root (no leading /)")
+        if pattern.startswith(":"):
+            raise ConfigError(f"{where} entry {pattern!r} must be a plain glob pattern, not a git pathspec")
+        if ".." in pattern.split("/"):
+            raise ConfigError(f"{where} entry {pattern!r} must not contain '..' segments")
+        patterns.append(pattern)
+    return tuple(patterns)
 
 
 def _positive_int(value: object, where: str) -> int:
@@ -1151,6 +1179,7 @@ def load(start: Path | None = None, *, worktree: bool = False) -> Config:
                     verify=verify_policy(item.get("verify"), f"apply.targets.{name}.verify"),
                     diagnostics=item.get("diagnostics"),
                     supersession=supersession_mode(item.get("supersession", ""), f"apply.targets.{name}.supersession"),
+                    watch_paths=watch_paths(item.get("watch_paths"), f"apply.targets.{name}.watch_paths"),
                 )
     elif isinstance(raw_targets, dict):
         for name, item in raw_targets.items():
@@ -1164,12 +1193,16 @@ def load(start: Path | None = None, *, worktree: bool = False) -> Config:
                     verify=verify_policy(item.get("verify"), f"apply.targets.{name}.verify"),
                     diagnostics=item.get("diagnostics"),
                     supersession=supersession_mode(item.get("supersession", ""), f"apply.targets.{name}.supersession"),
+                    watch_paths=watch_paths(item.get("watch_paths"), f"apply.targets.{name}.watch_paths"),
                 )
     if targets and "verify" in apply_t:
         raise ConfigError("[apply].verify applies to the implicit default target only; "
                           "with [apply.targets], set verify on each target")
     if targets and "diagnostics" in apply_t:
         raise ConfigError("with [apply.targets], set diagnostics on each target")
+    if targets and "watch_paths" in apply_t:
+        raise ConfigError("[apply].watch_paths applies to the implicit default target only; "
+                          "with [apply.targets], set watch_paths on each target")
     if not targets:
         targets["default"] = DeployTarget(
             name="default",
@@ -1178,6 +1211,7 @@ def load(start: Path | None = None, *, worktree: bool = False) -> Config:
             adapter=default_adapter,
             verify=verify_policy(apply_t.get("verify"), "apply.verify"),
             diagnostics=apply_t.get("diagnostics"),
+            watch_paths=watch_paths(apply_t.get("watch_paths"), "[apply].watch_paths"),
         )
     from factory.diagnostics import policy as diagnostic_policy
     for target in targets.values():

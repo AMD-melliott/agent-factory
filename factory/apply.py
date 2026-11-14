@@ -247,17 +247,30 @@ def fresh_checkout(commit: str) -> Path:
     return wt
 
 
-def touches_target_dir(commit: str, target_dir: str) -> bool:
+def touches_target_dir(commit: str, target_dir: str, watch_paths: tuple[str, ...] = ()) -> bool:
     proc = dispatch.run(
-        ["git", "diff", "--name-only", f"{commit}~1", commit, "--", target_dir],
+        ["git", "diff", "--name-only", f"{commit}~1", commit, "--", *deploy.target_pathspecs(target_dir, watch_paths)],
         cwd=cfg.root,
         check=False,
     )
     return bool(proc.stdout.strip())
 
 
-def touches_apply_dir(commit: str) -> bool:
-    return touches_target_dir(commit, cfg.apply_dir)
+def touches_apply_dir(commit: str, watch_paths: tuple[str, ...] = ()) -> bool:
+    return touches_target_dir(commit, cfg.apply_dir, watch_paths)
+
+
+def touches_target(commit: str, target: config.DeployTarget) -> bool:
+    """Whether `commit` belongs to `target`: it changes the target's directory
+    or a file matching one of its watch_paths (`deploy.target_pathspecs`)."""
+    if target.dir == cfg.apply_dir:
+        return touches_apply_dir(commit, target.watch_paths)
+    return touches_target_dir(commit, target.dir, target.watch_paths)
+
+
+def target_paths(target: config.DeployTarget) -> str:
+    """The paths a target watches, for log messages."""
+    return ", ".join([target.dir, *target.watch_paths])
 
 
 def apply_env() -> dict:
@@ -446,14 +459,14 @@ def apply_one(ticket: dict, dry_run: bool, target: str = "default", adapter: dep
     target_obj = cfg.targets.get(target) or config.DeployTarget(
         name=target, dir=cfg.apply_dir, enabled=cfg.apply_enabled
     )
-    target_dir = target_obj.dir if target_obj else cfg.apply_dir
-    touches = touches_apply_dir(commit) if target == "default" else touches_target_dir(commit, target_dir)
+    watched = target_paths(target_obj)
+    touches = touches_target(commit, target_obj)
 
     if not touches:
         if dry_run:
-            log(f"#{n}: would skip (doesn't touch {target_dir})")
+            log(f"#{n}: would skip (doesn't touch {watched})")
             return True
-        log(f"#{n}: PR #{pr} doesn't touch {target_dir}; nothing to apply")
+        log(f"#{n}: PR #{pr} doesn't touch {watched}; nothing to apply")
         run = deploy.DeployRun(
             run_id=f"deploy-{target}-{commit[:8] if commit else '0'}-{attempt}",
             target=target,
@@ -464,11 +477,11 @@ def apply_one(ticket: dict, dry_run: bool, target: str = "default", adapter: dep
             started_at=now,
             completed_at=now,
             pr=pr,
-            output=f"no changes under {target_dir}",
+            output=f"no changes under {watched}",
             version=deploy.CONTRACT_VERSION,
         )
         deploy.record_deploy_run(run)
-        dispatch.record("applied", ticket=n, pr=pr, commit=commit, ok=True, note=f"no changes under {target_dir}", run_id=run.run_id, target=target)
+        dispatch.record("applied", ticket=n, pr=pr, commit=commit, ok=True, note=f"no changes under {watched}", run_id=run.run_id, target=target)
         return True
 
     if adapter is None:
@@ -600,11 +613,11 @@ def apply_one(ticket: dict, dry_run: bool, target: str = "default", adapter: dep
 
 
 def target_dirs_touched(commit: str) -> list[str]:
-    """Names of the enabled deploy targets whose directory `commit` changes."""
+    """Names of the enabled deploy targets `commit` belongs to (`touches_target`)."""
     targets = cfg.targets or {
         "default": config.DeployTarget(name="default", dir=cfg.apply_dir, enabled=cfg.apply_enabled)
     }
-    return [name for name, target in targets.items() if target.enabled and touches_target_dir(commit, target.dir)]
+    return [name for name, target in targets.items() if target.enabled and touches_target(commit, target)]
 
 
 def authorize_revision(pr: int, reason: str | None, dry_run: bool, adopt: bool = False) -> int:
@@ -891,9 +904,7 @@ def run_pass(args: argparse.Namespace) -> int:
                     continue
 
                 def check_touch(c: str, target: config.DeployTarget = target) -> bool:
-                    if target.dir == cfg.apply_dir:
-                        return touches_apply_dir(c)
-                    return touches_target_dir(c, target.dir)
+                    return touches_target(c, target)
 
                 candidates, unauthorized = deploy.select_candidates_for_target(
                     target_name=target_name,
@@ -907,11 +918,12 @@ def run_pass(args: argparse.Namespace) -> int:
                     supersession=mode,
                     repo=cfg.repo,
                     approvals=approvals,
+                    watch_paths=target.watch_paths,
                 )
 
                 if unauthorized:
                     for unauth_commit in unauthorized:
-                        msg = f"unauthorized direct merge detected for target `{target_name}`: commit {unauth_commit[:8]} touches {target.dir} without an approved PR"
+                        msg = f"unauthorized direct merge detected for target `{target_name}`: commit {unauth_commit[:8]} touches {target_paths(target)} without an approved PR"
                         log(msg)
                         if source := merged_by.get(unauth_commit):
                             log(f"  merged by PR #{source['pr']}; once reviewed, run `factory apply --authorize-revision "
