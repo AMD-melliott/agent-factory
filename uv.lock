@@ -1,13 +1,10 @@
 version = 1
-revision = 5
+revision = 3
 requires-python = ">=3.11"
 resolution-markers = [
     "python_full_version >= '3.12'",
     "python_full_version < '3.12'",
 ]
-
-[options]
-exclude-newer = "2026-10-08T03:57:18Z"
 
 [[package]]
 name = "aiohappyeyeballs"

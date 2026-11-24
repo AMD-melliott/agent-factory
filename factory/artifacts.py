@@ -266,10 +266,12 @@ def _render_verification(v: dict | None, limit: int = 10) -> list[str]:
         return []
     items = v.get("items") or []
     healthy = sum(1 for i in items if i.get("state") == "healthy")
-    lines = [(f"\nHealth verification: **{v.get('verdict')}** ({healthy}/{len(items)} healthy, "
-              f"{v.get('elapsed_sec')}s of {v.get('timeout_sec')}s)")]
+    # Adapter-reported verification need not carry the engine's timing fields.
+    timing = (f", {v['elapsed_sec']}s of {v['timeout_sec']}s"
+              if v.get("elapsed_sec") is not None and v.get("timeout_sec") is not None else "")
+    lines = [f"\nHealth verification: **{v.get('verdict')}** ({healthy}/{len(items)} healthy{timing})"]
     for i in sorted(items, key=lambda i: i.get("state") == "healthy")[:limit]:
-        label = i.get("id") or i.get("name") or i.get("address") or "?"
+        label = i.get("id") or i.get("name") or i.get("address") or i.get("url") or i.get("kind") or "?"
         detail = (i.get("detail") or "").splitlines()[-1:] or [""]
         lines.append(f"- `{label}` ({i.get('policy') or i.get('kind')}): {i.get('state')} -- {detail[0]}")
     if len(items) > limit:
