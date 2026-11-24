@@ -58,18 +58,21 @@ def unit_env(unit: str) -> dict[str, str] | None:
 def units_for(cfg: config.Config) -> list[str]:
     # Triage is retired as a standalone unit: the unified `{cfg.unit}.service`'s
     # `-` prefixed ExecStart runs it, one pass ahead of dispatch (see onboard.units()).
-    return [f"{cfg.unit}.service", f"{cfg.unit}-dashboard.service", *([cfg.apply_unit] if cfg.apply_unit else [])]
+    # A host that only deploys ([install].dispatch = false) has no pass unit.
+    return [*([cfg.dispatch_unit] if cfg.dispatch_unit else []), f"{cfg.unit}-dashboard.service",
+            *([cfg.apply_unit] if cfg.apply_unit else [])]
 
 
 def required_units(cfg: config.Config) -> set[str]:
     """Units whose absence is itself a failure, not a benign "not installed" row.
 
-    The dispatcher unit is always required. The dashboard unit is required only
+    The dispatcher unit is required unless the host only deploys
+    (`[install].dispatch = false`). The dashboard unit is required only
     when `[install].dashboard` is enabled -- a disabled dashboard is expected to
     be absent, same as `onboard.install()` treats it. The apply unit is required
     whenever `cfg.apply_unit` names one: without it approved merges never deploy.
     """
-    units = {f"{cfg.unit}.service"}
+    units = {cfg.dispatch_unit} if cfg.dispatch_unit else set()
     if cfg.install.get("dashboard"):
         units.add(f"{cfg.unit}-dashboard.service")
     if cfg.apply_unit:

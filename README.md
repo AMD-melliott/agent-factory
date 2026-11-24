@@ -107,7 +107,9 @@ starts as it ends (success or failure), so an approved merge deploys in the cycl
 merged it, with no operator step. The pass unit is ordered after it, so a timer firing
 during a long apply waits for it to finish. The apply unit is never enabled and has no
 timer: stopping the pass timer also stops applies. Host-owned `[install].apply = false`
-renders neither the unit nor the trigger, leaving `factory apply` to the operator; see
+renders neither the unit nor the trigger, leaving `factory apply` to the operator.
+On a host that only deploys, host-owned `[install].dispatch = false` drops the pass unit
+and the timer starts the apply unit directly; see
 [deployment lifecycle](docs/deployment-lifecycle.md#scheduling).
 
 Generated triage, triage-probe, dispatch, apply and dashboard services use the interpreter

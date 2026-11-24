@@ -130,7 +130,7 @@ KNOWN_KEYS = {
     "publisher": ("enabled", "allow_publish", "key", "login", "kind", "timeout", "request_timeout", "max_requests", "max_response_bytes", "status_file", "status_uid"),
     "journal": ("max_mb", "retention"),
     "dashboard": ("port", "theme"),
-    "install": ("every", "dashboard", "host", "python", "env", "dispatch_env", "apply"),
+    "install": ("every", "dashboard", "host", "python", "env", "dispatch_env", "apply", "dispatch"),
     "apply": ("enabled", "dir", "env", "targets", "baseline", "supersession", "adapter", "verify", "diagnostics",
               "credential_warn_hours", "github_logins", "watch_paths"),
     "collaboration": ("fallback", "reasons", "components"),
@@ -459,6 +459,13 @@ class Config:
         """`<unit>-apply.service`, which each pass starts after it ends; None when this repo
         has no `[apply]` lane or the host opts out with `[install].apply = false`."""
         return f"{self.unit}-apply.service" if self.apply_enabled and self.install.get("apply", True) else None
+
+    @property
+    def dispatch_unit(self) -> str | None:
+        """`<unit>.service`, the triage + dispatch pass the timer starts; None when the host
+        sets `[install].dispatch = false` (a host that only deploys): the timer then starts
+        the apply unit directly."""
+        return f"{self.unit}.service" if self.install.get("dispatch", True) else None
 
     def worker_key(self, labels: set[str]) -> str:
         """The `[workers]` profile that owns these ticket labels (first match wins)."""
@@ -1146,6 +1153,9 @@ def load(start: Path | None = None, *, worktree: bool = False) -> Config:
     cfg.install["dashboard"] = bool(cfg.install["dashboard"])
     if not isinstance(cfg.install["apply"], bool):
         raise ConfigError("[install].apply must be true or false")
+    # Optional, default true; absent keeps cfg.install as it was.
+    if "dispatch" in cfg.install and not isinstance(cfg.install["dispatch"], bool):
+        raise ConfigError("[install].dispatch must be true or false")
     cfg.install["env"] = {k: str(v) for k, v in cfg.install["env"].items()}
     if "dispatch_env" in cfg.install:  # optional; absent keeps cfg.install as it was
         cfg.install["dispatch_env"] = {k: str(v) for k, v in cfg.install["dispatch_env"].items()}

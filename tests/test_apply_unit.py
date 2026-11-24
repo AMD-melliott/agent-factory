@@ -137,5 +137,104 @@ class ApplyUnitInstallTest(unittest.TestCase):
         self.assertTrue((self.units / APPLY).exists())
 
 
+TIMER = "factory-widgets.timer"
+
+
+class ApplyOnlyHostTest(unittest.TestCase):
+    """`[install].dispatch = false`: a host that only deploys. The timer starts the apply
+    unit directly and no triage/dispatch pass unit exists."""
+
+    def setUp(self) -> None:
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name)
+        self.units = self.root / "units"
+
+    def test_timer_starts_the_apply_unit_and_no_pass_unit_is_rendered(self) -> None:
+        cfg = make_cfg(self.root, dispatch=False, dispatch_env={"GH_CONFIG_DIR": "/machine/gh"})
+        cfg.triage_service = "ollama.service"
+        cfg.eval_schedule = True
+        units = onboard.units(cfg, "10min", "127.0.0.1")
+        self.assertEqual(set(units), {APPLY, TIMER, "factory-widgets-dashboard.service"})
+        self.assertIn(f"Unit={APPLY}\n", units[TIMER])
+        self.assertIn("OnUnitActiveSec=10min\n", units[TIMER])
+        body = units[APPLY]
+        [start] = [line for line in body.splitlines() if line.startswith("ExecStart=")]
+        self.assertTrue(start.endswith(" -P -m factory apply"))
+        self.assertIn("Environment=GH_CONFIG_DIR=/machine/gh", body)
+        self.assertNotIn("[Install]", body)
+        for key, value in cfg.apply_env.items():
+            for unit in units.values():
+                self.assertNotIn(key, unit)
+                self.assertNotIn(value, unit)
+
+    def test_nothing_to_schedule_is_a_config_error(self) -> None:
+        for cfg in (make_cfg(self.root, lane=False, dispatch=False), make_cfg(self.root, apply=False, dispatch=False)):
+            with self.assertRaisesRegex(config.ConfigError, r"\[install\]\.dispatch = false"):
+                onboard.units(cfg, "10min", "127.0.0.1")
+
+    def test_install_dispatch_must_be_boolean(self) -> None:
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            subprocess.run(["git", "init", "-q", str(root)], check=True)
+            (root / config.CONFIG_NAME).write_text('[repo]\nslug = "acme/widgets"\n')
+            with patch.dict("os.environ", {"XDG_CONFIG_HOME": str(root / "xdg")}):
+                cfg = config.load(root)
+                self.assertEqual(cfg.dispatch_unit, f"factory-{cfg.name}.service")
+                (root / "xdg" / "factory").mkdir(parents=True)
+                host = root / "xdg" / "factory" / "config.toml"
+                host.write_text('[defaults.install]\ndispatch = false\n')
+                self.assertIsNone(config.load(root).dispatch_unit)
+                host.write_text('[defaults.install]\ndispatch = "no"\n')
+                with self.assertRaisesRegex(config.ConfigError, r"\[install\]\.dispatch"):
+                    config.load(root)
+
+    def test_only_the_apply_unit_is_inspected_and_required(self) -> None:
+        cfg = make_cfg(self.root, dispatch=False)
+        self.assertNotIn(SERVICE, verify_secrets.units_for(cfg))
+        self.assertEqual(verify_secrets.required_units(cfg), {APPLY})
+        self.assertEqual(verify_secrets.expected_unit_env(cfg, APPLY), verify_secrets.expected_unit_env(make_cfg(self.root), APPLY))
+
+    def install(self, cfg: config.Config, argv: list[str], *, active: dict | None = None):
+        calls: list[list[str]] = []
+
+        def command(cmd: list[str], cwd: Path | None = None) -> subprocess.CompletedProcess:
+            calls.append(cmd)
+            if cmd[:3] == ["systemctl", "--user", "is-active"]:
+                return subprocess.CompletedProcess(cmd, 0, f"{(active or {}).get(cmd[-1], 'inactive')}\n", "")
+            if cmd[0] == "loginctl":
+                return subprocess.CompletedProcess(cmd, 0, "yes\n", "")
+            return subprocess.CompletedProcess(cmd, 0, "", "")
+
+        with patch.object(onboard.config, "load", return_value=cfg), \
+                patch.object(onboard.config, "host_config_path", return_value=self.root / "config.toml"), \
+                patch.object(onboard, "unit_dir", return_value=self.units), \
+                patch.object(onboard, "sh", side_effect=command), \
+                patch.object(onboard.shutil, "which", return_value="/bin/systemctl"):
+            code = onboard.install(argv)
+        return code, calls
+
+    def test_switching_to_apply_only_removes_the_idle_pass_unit_and_restarts_the_timer(self) -> None:
+        cfg = make_cfg(self.root)
+        cfg.triage_service = "ollama.service"
+        self.install(cfg, [])
+        self.assertTrue((self.units / SERVICE).exists())
+        only = make_cfg(self.root, dispatch=False)
+        only.triage_service = "ollama.service"
+        code, calls = self.install(only, [])
+        self.assertEqual(code, 0)
+        self.assertFalse((self.units / SERVICE).exists())
+        self.assertFalse((self.units / "factory-widgets-triage-probe.timer").exists())
+        self.assertIn(f"Unit={APPLY}", (self.units / TIMER).read_text())
+        self.assertIn(["systemctl", "--user", "restart", TIMER], calls)
+        self.assertFalse([c for c in calls if c[0] == "systemctl" and c[-1] == APPLY and c[2] != "is-active"])
+
+    def test_switching_refuses_while_a_pass_runs(self) -> None:
+        self.install(make_cfg(self.root), ["--no-start"])
+        with self.assertRaisesRegex(config.ConfigError, "let the pass finish"):
+            self.install(make_cfg(self.root, dispatch=False), [], active={SERVICE: "activating"})
+        self.assertTrue((self.units / SERVICE).exists())
+
+
 if __name__ == "__main__":
     unittest.main()

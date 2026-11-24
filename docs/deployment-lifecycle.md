@@ -144,6 +144,23 @@ adapter = "terraform"
   and so new applies; a running apply finishes. Host-owned `[install].apply = false`
   removes the trigger and the unit on the next `factory install` (refused while an
   apply is running), leaving applies to the operator.
+- **A host that only deploys.** Host-owned `[install].dispatch = false` drops the
+  triage + dispatch pass: `<unit>.timer` starts `<unit>-apply.service` directly
+  (`Unit=` in its `[Timer]` section), and no pass, triage-probe or eval unit is
+  written. Use it where merges happen elsewhere (people merge on GitHub) and this host
+  only deploys them. The apply unit carries the same environment as above, `inspect`
+  and `verify-secrets` require only it, and `doctor` reports dispatcher-only problems
+  (workers, reviewer, manager, gate checks, the dispatcher/dashboard identity split)
+  as warnings. The next `factory install` removes an idle pass unit left from the full
+  layout (refused while a pass runs). With no apply unit to schedule (`[apply].enabled`
+  or `[install].apply` off) `factory install` refuses.
+
+  ```toml
+  # host config, ~/.config/factory/config.toml
+  [repo."acme/widgets".install]
+  dispatch = false
+  every = "10min"
+  ```
 
 ## GitHub identity
 
