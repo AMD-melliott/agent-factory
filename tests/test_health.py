@@ -606,6 +606,22 @@ interval = 1
         self.assertIn("Health verification: **unhealthy**", body)
         self.assertNotIn(TOKEN, json.dumps(summary) + body + json.dumps(run.to_dict()))
 
+    def test_comment_labels_unnamed_adapter_items_and_omits_missing_timing(self) -> None:
+        body = artifacts.render_comment({
+            "status": "succeeded", "run_id": "r1", "target": "web",
+            "verification": {"verdict": "healthy", "items": [
+                {"kind": "http", "state": "healthy", "url": "http://web.example.test/healthz", "detail": "200"},
+                {"kind": "app_revision", "state": "healthy", "detail": "matches"},
+                {"kind": "k8s_rollout", "state": "healthy", "name": "web", "detail": "1/1"},
+            ]},
+        })
+        self.assertIn("Health verification: **healthy** (3/3 healthy)", body)
+        self.assertIn("- `http://web.example.test/healthz` (http): healthy", body)
+        self.assertIn("- `app_revision` (app_revision): healthy", body)
+        self.assertIn("- `web` (k8s_rollout): healthy", body)
+        self.assertNotIn("`?`", body)
+        self.assertNotIn("None", body)
+
     def test_healthy_runtime_succeeds_with_evidence(self) -> None:
         nomad = FakeNomad()
         self.addCleanup(nomad.close)
