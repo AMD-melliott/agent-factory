@@ -1,6 +1,7 @@
 # Changelog
 
 ## Unreleased
+- Upstream sync PRs are reviewed on their fork-side change: the inline review packet carries each merge's conflict resolution (`git show --remerge-diff`) and each later fork commit, and names the upstream tip it leaves out, so a large upstream sync no longer exceeds the 120 KiB inline prompt limit. Other branches keep the `origin/<main>..<head>` packet.
 - High-risk second reviewer runs without tools, extensions, skills or rules, like the primary reviewer, so it judges only the inline packet; `factory doctor` warns when an `omp` reviewer or second reviewer lacks `--no-tools` (#84).
 - Host-owned `[install].dispatch = false` schedules apply only, for a host that only deploys: `factory install` writes `<unit>.timer` with `Unit=<unit>-apply.service` and no triage + dispatch pass, triage-probe or eval unit, and removes an idle pass unit left from the full layout (refused while a pass runs). The apply unit keeps `[install].env` and `[install].dispatch_env` and never `[apply].env`. `inspect` and `verify-secrets` require only the apply unit; `doctor` downgrades dispatcher-only failures to warnings. With no apply unit to schedule, `factory install` refuses. Default `true` keeps the previous layout.
 - Deploy comments label each health-verification row by its `id`, `name`, `address`, then `url` or `kind`, instead of `?` for adapter rows that carry only a URL. The header omits the `Ns of Ms` timing when the verification (typically adapter-reported) has no `elapsed_sec`/`timeout_sec`, instead of printing `None`.
