@@ -58,18 +58,21 @@ def unit_env(unit: str) -> dict[str, str] | None:
 def units_for(cfg: config.Config) -> list[str]:
     # Triage is retired as a standalone unit: the unified `{cfg.unit}.service`'s
     # `-` prefixed ExecStart runs it, one pass ahead of dispatch (see onboard.units()).
-    return [f"{cfg.unit}.service", f"{cfg.unit}-dashboard.service", *([cfg.apply_unit] if cfg.apply_unit else [])]
+    # A host that only deploys ([install].dispatch = false) has no pass unit.
+    return [*([cfg.dispatch_unit] if cfg.dispatch_unit else []), f"{cfg.unit}-dashboard.service",
+            *([cfg.apply_unit] if cfg.apply_unit else [])]
 
 
 def required_units(cfg: config.Config) -> set[str]:
     """Units whose absence is itself a failure, not a benign "not installed" row.
 
-    The dispatcher unit is always required. The dashboard unit is required only
+    The dispatcher unit is required unless the host only deploys
+    (`[install].dispatch = false`). The dashboard unit is required only
     when `[install].dashboard` is enabled -- a disabled dashboard is expected to
     be absent, same as `onboard.install()` treats it. The apply unit is required
     whenever `cfg.apply_unit` names one: without it approved merges never deploy.
     """
-    units = {f"{cfg.unit}.service"}
+    units = {cfg.dispatch_unit} if cfg.dispatch_unit else set()
     if cfg.install.get("dashboard"):
         units.add(f"{cfg.unit}-dashboard.service")
     if cfg.apply_unit:
@@ -77,8 +80,16 @@ def required_units(cfg: config.Config) -> set[str]:
     return units
 
 
+def expected_unit_env(cfg: config.Config, unit: str | None) -> dict:
+    """Match onboard.units(): only dispatcher/apply receive dispatch overrides."""
+    expected = dict(cfg.install["env"])
+    if unit == f"{cfg.unit}.service" or (cfg.apply_unit and unit == cfg.apply_unit):
+        expected.update(cfg.install.get("dispatch_env", {}))
+    return expected
+
+
 def sync_rows(cfg: config.Config, unit_env_fn=None) -> list[tuple[str, str, str]]:
-    """(unit, key, status) for every [install].env key, one row per unit that's actually installed."""
+    """(unit, key, status) for each unit's expected installation environment."""
     unit_env_fn = unit_env_fn or unit_env  # looked up at call time so tests can mock the module-level default
     rows: list[tuple[str, str, str]] = []
     for unit in units_for(cfg):
@@ -86,7 +97,7 @@ def sync_rows(cfg: config.Config, unit_env_fn=None) -> list[tuple[str, str, str]
         if installed is None:
             rows.append((unit, "*", "not installed"))
             continue
-        for key, want in cfg.install["env"].items():
+        for key, want in expected_unit_env(cfg, unit).items():
             got = installed.get(key)
             if got is None:
                 status = "missing from unit"

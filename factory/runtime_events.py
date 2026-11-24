@@ -34,7 +34,7 @@ OUTCOMES = {
     "project_escalation", "approved", "merged", "refreshed", "not_admitted", "not_eligible",
 }
 REASONS = {
-    "APPROVE", "REVISE", "unparsed_verdict", "merge_conflict", "upstream_gate_failed",
+    "APPROVE", "REVISE", "unparsed_verdict", "tool_call_markup", "merge_conflict", "upstream_gate_failed",
     "upstream_sync", "upstream_staged", "check_terminated_by_signal", "check_timeout", "configured_check_failed",
     "conflict_markers", "git_grep_failed", "git_diff_failed", "leak_scan_matches",
     "github_command_failed", "triage_endpoint_timeout", "triage_endpoint_unavailable",

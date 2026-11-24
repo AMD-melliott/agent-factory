@@ -124,15 +124,15 @@ KNOWN_KEYS = {
     "eval": ("max_cases", "max_tokens", "budget_min", "profile", "schedule"),
     "gate": ("timeout", "lock", "check", "protected_paths", "add_only_paths"),
     "leak_scan": ("pattern", "exclude", "extra"),
-    "triage": ("url", "model", "key", "timeout", "service"),
+    "triage": ("url", "model", "key", "headers", "api", "timeout", "service"),
     "investigation": ("enabled", "allow_export", "url", "model", "key", "allow_loopback_http",
                       "max_input_bytes", "max_output_tokens", "token_budget", "timeout", "max_requests", "send_store_false", "allow_shared_model_key"),
     "publisher": ("enabled", "allow_publish", "key", "login", "kind", "timeout", "request_timeout", "max_requests", "max_response_bytes", "status_file", "status_uid"),
     "journal": ("max_mb", "retention"),
     "dashboard": ("port", "theme"),
-    "install": ("every", "dashboard", "host", "python", "env", "dispatch_env", "apply"),
+    "install": ("every", "dashboard", "host", "python", "env", "dispatch_env", "apply", "dispatch"),
     "apply": ("enabled", "dir", "env", "targets", "baseline", "supersession", "adapter", "verify", "diagnostics",
-              "credential_warn_hours", "github_logins"),
+              "credential_warn_hours", "github_logins", "watch_paths"),
     "collaboration": ("fallback", "reasons", "components"),
     "prices": None,
 }
@@ -175,6 +175,9 @@ class DeployTarget:
     verify: VerifyPolicy | None = None
     diagnostics: dict | None = None
     supersession: str = ""  # overrides [apply].supersession for this target when set
+    # Extra root-relative git glob pathspecs whose changes also make a commit a
+    # member of this target (e.g. the Dockerfile of an image-built target).
+    watch_paths: tuple[str, ...] = ()
 
 
 @dataclass
@@ -212,6 +215,31 @@ def supersession_mode(value: object, where: str) -> str:
     if value not in SUPERSESSION_MODES:
         raise ConfigError(f"{where} must be one of {', '.join(SUPERSESSION_MODES)}")
     return str(value)
+
+
+def watch_paths(value: object, where: str) -> tuple[str, ...]:
+    """A target's `watch_paths`: repository-relative glob patterns, matched by
+    git as `:(top,glob)` pathspecs (see `deploy.target_pathspecs`). Patterns may
+    overlap another target's dir or watch_paths: a shared input such as a base
+    Dockerfile legitimately makes one merge a candidate on several targets."""
+    if value is None:
+        return ()
+    if not isinstance(value, list):
+        raise ConfigError(f"{where} must be a list of path patterns")
+    patterns = []
+    for pattern in value:
+        if not isinstance(pattern, str) or not pattern.strip():
+            raise ConfigError(f"{where} entries must be non-empty strings")
+        if pattern != pattern.strip():
+            raise ConfigError(f"{where} entry {pattern!r} has leading or trailing whitespace")
+        if pattern.startswith("/"):
+            raise ConfigError(f"{where} entry {pattern!r} must be relative to the repository root (no leading /)")
+        if pattern.startswith(":"):
+            raise ConfigError(f"{where} entry {pattern!r} must be a plain glob pattern, not a git pathspec")
+        if ".." in pattern.split("/"):
+            raise ConfigError(f"{where} entry {pattern!r} must not contain '..' segments")
+        patterns.append(pattern)
+    return tuple(patterns)
 
 
 def _positive_int(value: object, where: str) -> int:
@@ -386,7 +414,9 @@ class Config:
     leak_exclude: list[str] = field(default_factory=list)
     llm_url: str = DEFAULT_LLM_URL
     llm_model: str = DEFAULT_LLM_MODEL
+    llm_api: str = "openai"
     llm_key: str = ""  # bearer token for a gated endpoint (e.g. LiteLLM); host config only, never committed
+    llm_headers: dict[str, str] = field(default_factory=dict, repr=False)
     investigation: dict = field(default_factory=dict, repr=False)  # host-only model role
     publisher: dict = field(default_factory=dict, repr=False)  # host-only dedicated publication role
     triage_timeout: int = 60  # seconds per triage model request
@@ -429,6 +459,13 @@ class Config:
         """`<unit>-apply.service`, which each pass starts after it ends; None when this repo
         has no `[apply]` lane or the host opts out with `[install].apply = false`."""
         return f"{self.unit}-apply.service" if self.apply_enabled and self.install.get("apply", True) else None
+
+    @property
+    def dispatch_unit(self) -> str | None:
+        """`<unit>.service`, the triage + dispatch pass the timer starts; None when the host
+        sets `[install].dispatch = false` (a host that only deploys): the timer then starts
+        the apply unit directly."""
+        return f"{self.unit}.service" if self.install.get("dispatch", True) else None
 
     def worker_key(self, labels: set[str]) -> str:
         """The `[workers]` profile that owns these ticket labels (first match wins)."""
@@ -1076,7 +1113,29 @@ def load(start: Path | None = None, *, worktree: bool = False) -> Config:
         cfg.leak_pattern = "|".join(p for p in (cfg.leak_pattern, *terms) if p)
     cfg.llm_url = triage.get("url", cfg.llm_url)
     cfg.llm_model = triage.get("model", cfg.llm_model)
+    cfg.llm_api = triage.get("api", "openai")
+    if cfg.llm_api not in ("openai", "anthropic"):
+        raise ConfigError("triage.api must be openai or anthropic")
     cfg.llm_key = str(triage.get("key", cfg.llm_key))
+    committed_triage = raw_repo.get("triage", {})
+    if "headers" in committed_triage:
+        raise ConfigError("triage.headers is host-only")
+    headers = triage.get("headers", {})
+    if not isinstance(headers, dict):
+        raise ConfigError("triage.headers must map HTTP header names to text")
+    names = set()
+    reserved = {"host", "content-length", "content-type", "transfer-encoding", "connection",
+                "proxy-authorization", "proxy-connection", "upgrade", "trailer", "te", "expect", "keep-alive"}
+    for name, value in headers.items():
+        if (not re.fullmatch(r"[!#$%&'*+.^_`|~0-9A-Za-z-]+", name)
+                or name.lower() in reserved or name.lower() in names
+                or not isinstance(value, str)
+                or any(ord(char) < 32 or ord(char) > 126 for char in value)):
+            raise ConfigError("triage.headers contains an invalid, duplicate or reserved header")
+        names.add(name.lower())
+    if headers and "url" in committed_triage:
+        raise ConfigError("triage.url must be host-only when triage.headers is configured")
+    cfg.llm_headers = dict(headers)
     cfg.triage_timeout = int(triage.get("timeout", cfg.triage_timeout))
     service = triage.get("service")
     if service is not None and (
@@ -1094,6 +1153,9 @@ def load(start: Path | None = None, *, worktree: bool = False) -> Config:
     cfg.install["dashboard"] = bool(cfg.install["dashboard"])
     if not isinstance(cfg.install["apply"], bool):
         raise ConfigError("[install].apply must be true or false")
+    # Optional, default true; absent keeps cfg.install as it was.
+    if "dispatch" in cfg.install and not isinstance(cfg.install["dispatch"], bool):
+        raise ConfigError("[install].dispatch must be true or false")
     cfg.install["env"] = {k: str(v) for k, v in cfg.install["env"].items()}
     if "dispatch_env" in cfg.install:  # optional; absent keeps cfg.install as it was
         cfg.install["dispatch_env"] = {k: str(v) for k, v in cfg.install["dispatch_env"].items()}
@@ -1127,6 +1189,7 @@ def load(start: Path | None = None, *, worktree: bool = False) -> Config:
                     verify=verify_policy(item.get("verify"), f"apply.targets.{name}.verify"),
                     diagnostics=item.get("diagnostics"),
                     supersession=supersession_mode(item.get("supersession", ""), f"apply.targets.{name}.supersession"),
+                    watch_paths=watch_paths(item.get("watch_paths"), f"apply.targets.{name}.watch_paths"),
                 )
     elif isinstance(raw_targets, dict):
         for name, item in raw_targets.items():
@@ -1140,12 +1203,16 @@ def load(start: Path | None = None, *, worktree: bool = False) -> Config:
                     verify=verify_policy(item.get("verify"), f"apply.targets.{name}.verify"),
                     diagnostics=item.get("diagnostics"),
                     supersession=supersession_mode(item.get("supersession", ""), f"apply.targets.{name}.supersession"),
+                    watch_paths=watch_paths(item.get("watch_paths"), f"apply.targets.{name}.watch_paths"),
                 )
     if targets and "verify" in apply_t:
         raise ConfigError("[apply].verify applies to the implicit default target only; "
                           "with [apply.targets], set verify on each target")
     if targets and "diagnostics" in apply_t:
         raise ConfigError("with [apply.targets], set diagnostics on each target")
+    if targets and "watch_paths" in apply_t:
+        raise ConfigError("[apply].watch_paths applies to the implicit default target only; "
+                          "with [apply.targets], set watch_paths on each target")
     if not targets:
         targets["default"] = DeployTarget(
             name="default",
@@ -1154,6 +1221,7 @@ def load(start: Path | None = None, *, worktree: bool = False) -> Config:
             adapter=default_adapter,
             verify=verify_policy(apply_t.get("verify"), "apply.verify"),
             diagnostics=apply_t.get("diagnostics"),
+            watch_paths=watch_paths(apply_t.get("watch_paths"), "[apply].watch_paths"),
         )
     from factory.diagnostics import policy as diagnostic_policy
     for target in targets.values():

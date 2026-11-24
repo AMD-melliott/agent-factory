@@ -107,7 +107,9 @@ starts as it ends (success or failure), so an approved merge deploys in the cycl
 merged it, with no operator step. The pass unit is ordered after it, so a timer firing
 during a long apply waits for it to finish. The apply unit is never enabled and has no
 timer: stopping the pass timer also stops applies. Host-owned `[install].apply = false`
-renders neither the unit nor the trigger, leaving `factory apply` to the operator; see
+renders neither the unit nor the trigger, leaving `factory apply` to the operator.
+On a host that only deploys, host-owned `[install].dispatch = false` drops the pass unit
+and the timer starts the apply unit directly; see
 [deployment lifecycle](docs/deployment-lifecycle.md#scheduling).
 
 Generated triage, triage-probe, dispatch, apply and dashboard services use the interpreter
@@ -157,6 +159,13 @@ ticket exit, so it cannot affect later refresh or manager FIX pushes.
 No other ref is force-pushed.
 Review-request opt-in accepts requests naming either the dispatcher's or the
 dashboard's login.
+
+`verify-secrets` and `inspect` compare each unit against its rendered role:
+dispatcher and apply use `[install].env` plus `[install].dispatch_env`, while
+the dashboard uses `[install].env`. Dispatch-only keys are checked too; a valid
+override does not require reinstalling the unit. Inspection applies the same
+comparison to configured, effective and running-process environments and retains
+the separate adapter credential-isolation checks.
 
 `factory apply` and `factory incidents --deliver/--retry` act on GitHub as that same
 dispatcher identity, whether the apply unit or an operator shell runs them, and only
@@ -1202,6 +1211,40 @@ The shared host file is `$XDG_CONFIG_HOME/factory/config.toml` (default
 snapshot. Factory leaves this metadata opaque and out of pipeline configuration;
 `doctor` accepts it only under `defaults`. Unknown tables and an `engine` table
 under a per-repository section still produce host-config warnings.
+
+Gateway-specific triage headers are host-only. Configure them under
+`[defaults.triage.headers]` or `[repo."owner/name".triage.headers]` in that
+private host file, using the gateway's documented header names. For example:
+
+```toml
+[repo."acme/widgets".triage]
+url = "https://gateway.example.invalid/v1/chat/completions"
+model = "example-model"
+
+[repo."acme/widgets".triage.headers]
+X-Application-Key = "<application-key>"
+user = "<calling-user>"
+```
+
+Keep credential values out of repository configuration and logs. When headers
+are configured, the endpoint URL must also come from host configuration;
+a repository cannot override it. Header names are case-insensitive, duplicate
+names and transport/framing headers are rejected, and values must be printable
+ASCII. Custom `Authorization` overrides the existing `triage.key` bearer header.
+The same headers apply to model calls, doctor/liveness probes and dashboard
+availability checks. Requests carrying custom headers refuse HTTP redirects;
+probe diagnostics omit provider response bodies. This configures authentication,
+not an automatic choice of protocol. The default `triage.api = "openai"`
+uses Chat Completions. For an Anthropic Messages endpoint, set `api = "anthropic"`
+and its complete `/v1/messages` URL in the same triage table. Factory moves system
+messages to the native `system` field, supplies `max_tokens = 4096` and the
+`anthropic-version: 2023-06-01` header, reads text blocks and records native usage
+(including cache tokens). Cache-write tokens count as input for existing cost
+estimates; provider-specific cache-write premiums are not modeled. With this API, `triage.key`/`FACTORY_LLM_KEY` supplies
+`x-api-key` instead of bearer authorization. Custom headers override these
+defaults. Model-list probes use the sibling `/v1/models` endpoint.
+Anthropic environment variables are not automatically read by this client.
+No additional HTTP library is required.
 
 `[worker_wrap]` is host-only: set `command` under `[defaults.worker_wrap]` or
 `[repo."owner/name".worker_wrap]` (per-repo wins). Its argv is prepended to

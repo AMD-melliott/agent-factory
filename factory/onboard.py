@@ -17,7 +17,6 @@ import socket
 import subprocess
 import sys
 import tempfile
-import urllib.request
 from contextlib import suppress
 from pathlib import Path
 
@@ -581,6 +580,14 @@ def doctor(argv: list[str]) -> int:
         if args.json and fix is not None:
             rows[-1]["fix"] = fix
 
+    def report_dispatch(status: bool | None, label: str, detail: str = "") -> None:
+        """A check only the triage + dispatch pass depends on: on a host that only deploys
+        ([install].dispatch = false) a problem is a warning, not a blocking failure."""
+        if status is False and cfg.dispatch_unit is None:
+            report(None, label, "; ".join(filter(None, [detail, "not blocking: dispatch is off on this host"])))
+        else:
+            report(status, label, detail)
+
     host_base = Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config")
     host_candidates = [host_base / name / "config.toml" for name in ("factory", "agent-factory")]
     if all(path.exists() or path.is_symlink() for path in host_candidates):
@@ -667,7 +674,7 @@ def doctor(argv: list[str]) -> int:
         dispatcher = gh_login({**os.environ, **cfg.install["env"], **dispatch_env})
         dashboard = gh_login(config.dashboard_env(cfg))
         same = dispatcher.casefold() == dashboard.casefold()
-        report(
+        report_dispatch(
             bool(dispatcher and dashboard) and not same, "GitHub identities",
             f"dispatcher {dispatcher or '?'}, dashboard {dashboard or '?'}"
             + ("; [install].dispatch_env must select a different account" if dispatcher and same else ""),
@@ -712,7 +719,7 @@ def doctor(argv: list[str]) -> int:
         report(ok, f"upstream remote `{cfg.upstream}`", "" if ok else "add it or unset [repo].upstream")
 
     # The installed service runs with the PATH baked into its unit, not the caller's.
-    unit_file = unit_dir() / f"{cfg.unit}.service"
+    unit_file = unit_dir() / (cfg.dispatch_unit or cfg.apply_unit or f"{cfg.unit}.service")
     lines = unit_file.read_text().splitlines() if unit_file.exists() else []
     unit_path = next((ln.removeprefix("Environment=PATH=") for ln in reversed(lines) if ln.startswith("Environment=PATH=")), None)
     on_path = "" if unit_path is None else f"PATH from {unit_file}"
@@ -721,12 +728,12 @@ def doctor(argv: list[str]) -> int:
         return shutil.which(exe, path=unit_path)
 
     for label, argv_t in cfg.workers.items():
-        report(which(argv_t[0]) is not None, f"worker `{label}`: {argv_t[0]}", on_path)
+        report_dispatch(which(argv_t[0]) is not None, f"worker `{label}`: {argv_t[0]}", on_path)
     for name, wrap in (("worker wrap", cfg.worker_wrap), ("check wrap", cfg.check_wrap)):
         if wrap:  # the launch expands these placeholders before exec; so must the lookup
             exe = config.expand(wrap[:1], root=str(cfg.root), repo=cfg.repo, home=str(Path.home()))[0]
-            report(which(exe) is not None, f"{name}: {exe}", on_path)
-    report(which(cfg.reviewer[0]) is not None, f"reviewer: {cfg.reviewer[0]}", on_path)
+            report_dispatch(which(exe) is not None, f"{name}: {exe}", on_path)
+    report_dispatch(which(cfg.reviewer[0]) is not None, f"reviewer: {cfg.reviewer[0]}", on_path)
     second_problem = second_reviewer_problem(cfg, which)
     report(
         None if second_problem else True,
@@ -745,13 +752,13 @@ def doctor(argv: list[str]) -> int:
             problems.append('omp needs a prompt file; use "@{prompt}"')
         if which(cfg.manager[0]) is None:
             problems.append(f"executable not on {on_path or 'PATH'}: {cfg.manager[0]}")
-        report(not problems, "manager command", "; ".join(problems) if problems else cfg.manager[0])
+        report_dispatch(not problems, "manager command", "; ".join(problems) if problems else cfg.manager[0])
 
     if cfg.checks:
         for check in cfg.checks:
             exe = check.run[0]
             found = which(exe) is not None or (cfg.root / exe).exists()
-            report(found, f"gate check `{check.name}`: {exe}{' (exclusive)' if check.exclusive else ''}", on_path)
+            report_dispatch(found, f"gate check `{check.name}`: {exe}{' (exclusive)' if check.exclusive else ''}", on_path)
     else:
         report(None, "gate checks", "none configured; only conflict-markers and leak-scan run")
 
@@ -761,7 +768,7 @@ def doctor(argv: list[str]) -> int:
 
     from factory import triage
 
-    alive, detail = triage.probe_endpoint(cfg, opener=urllib.request.urlopen)
+    alive, detail = triage.probe_endpoint(cfg)
     report(
         True if alive else None,
         "triage model endpoint",
@@ -772,8 +779,12 @@ def doctor(argv: list[str]) -> int:
     report(True if timer == "active" else None, f"systemd timer {cfg.unit}.timer", timer or "not installed (factory install)")
     if cfg.apply_unit:
         loaded = sh(["systemctl", "--user", "show", "--property=LoadState", "--value", cfg.apply_unit]).stdout.strip()
+        started = "started after each pass" if cfg.dispatch_unit else f"started by {cfg.unit}.timer (dispatch is off on this host)"
         report(True if loaded == "loaded" else None, f"apply unit {cfg.apply_unit}",
-               "started after each pass" if loaded == "loaded" else "not installed (factory install); approved merges wait for a manual `factory apply`")
+               started if loaded == "loaded" else "not installed (factory install); approved merges wait for a manual `factory apply`")
+    elif cfg.dispatch_unit is None:
+        report(False, "apply-only host", "[install].dispatch = false but this repo has no [apply] lane here; "
+               "`factory install` refuses until [apply].enabled and [install].apply are on")
     if cfg.triage_service:
         probe_timer = f"{cfg.unit}-triage-probe.timer"
         active = sh(["systemctl", "--user", "is-active", probe_timer]).stdout.strip()
@@ -1101,7 +1112,33 @@ def units(cfg: config.Config, every: str, host: str) -> dict[str, str]:
                 "[Install]\nWantedBy=timers.target\n"
             ),
         })
+    if cfg.dispatch_unit is None:
+        return apply_only_units(cfg, every, exe, dispatch_env, wanted[f"{cfg.unit}-dashboard.service"])
     return wanted
+
+
+def apply_only_units(cfg: config.Config, every: str, exe: str, dispatch_env: str, dashboard: str) -> dict[str, str]:
+    """`[install].dispatch = false`: a host that only deploys. The timer starts the apply
+    unit itself; no triage, dispatch, watch, triage-probe or eval unit is written. The apply
+    unit keeps the dispatcher's GitHub identity (review reads, deploy comments) and, as in
+    the full layout, never `[apply].env`. The dashboard stays optional."""
+    apply_unit = cfg.apply_unit
+    if apply_unit is None:
+        raise ConfigError("[install].dispatch = false leaves nothing to schedule: this repo has no "
+                          "[apply] lane on this host ([apply].enabled or [install].apply is off)")
+    return {
+        apply_unit: (
+            f"[Unit]\nDescription=factory apply for {cfg.repo} (one pass, started by {cfg.unit}.timer)\n\n"
+            f"[Service]\nType=oneshot\nWorkingDirectory={cfg.root}\n{dispatch_env}"
+            f"ExecStart={exe} apply\n"
+        ),
+        f"{cfg.unit}.timer": (
+            f"[Unit]\nDescription=Run the factory apply pass for {cfg.repo} every {every}\n\n"
+            f"[Timer]\nUnit={apply_unit}\nOnBootSec=5min\nOnUnitActiveSec={every}\nRandomizedDelaySec=90\n\n"
+            f"[Install]\nWantedBy=timers.target\n"
+        ),
+        f"{cfg.unit}-dashboard.service": dashboard,
+    }
 
 
 def systemctl(*args: str) -> None:
@@ -1142,6 +1179,9 @@ def install(argv: list[str]) -> int:
     probe_timer = f"{cfg.unit}-triage-probe.timer"
     eval_service = f"{cfg.unit}-eval.service"
     eval_timer = f"{cfg.unit}-eval.timer"
+    # A host that only deploys ([install].dispatch = false) runs no triage probe or eval.
+    probe_on = bool(cfg.triage_service) and cfg.dispatch_unit is not None
+    eval_on = bool(cfg.eval_schedule) and cfg.dispatch_unit is not None
     if not args.dashboard:
         wanted.pop(dash_unit)
     if args.print:
@@ -1189,7 +1229,7 @@ def install(argv: list[str]) -> int:
             systemctl("disable", "--now", dash_unit)
             (udir / dash_unit).unlink()
             print(f"removed {udir / dash_unit}")
-    if not cfg.triage_service and any((udir / name).exists() for name in (probe_service, probe_timer)):
+    if not probe_on and any((udir / name).exists() for name in (probe_service, probe_timer)):
         if args.no_start:
             active = sh(["systemctl", "--user", "is-active", probe_timer]).stdout.strip()
             if active not in ("inactive", "failed", ""):
@@ -1212,7 +1252,16 @@ def install(argv: list[str]) -> int:
             raise ConfigError(f"{stale_apply.name} is {active}; let the apply finish, then rerun `factory install`")
         stale_apply.unlink()
         print(f"removed {stale_apply}")
-    if not cfg.eval_schedule:
+    stale_pass = udir / f"{cfg.unit}.service"
+    if cfg.dispatch_unit is None and stale_pass.exists():
+        # Same rule as the apply unit: never enabled (the timer starts it), so removal
+        # touches no links; a pass in flight finishes first.
+        active = sh(["systemctl", "--user", "is-active", stale_pass.name]).stdout.strip()
+        if active not in ("inactive", "failed", ""):
+            raise ConfigError(f"{stale_pass.name} is {active}; let the pass finish, then rerun `factory install`")
+        stale_pass.unlink()
+        print(f"removed {stale_pass}")
+    if not eval_on:
         if (udir / eval_timer).exists():
             systemctl("disable", "--now", eval_timer)
         for name in (eval_service, eval_timer):
@@ -1222,7 +1271,7 @@ def install(argv: list[str]) -> int:
     systemctl("daemon-reload")
     if args.no_start:
         print(f"factory install --no-start: units written to {udir}; systemd reloaded; nothing enabled or started")
-        activate = [f"{cfg.unit}.timer", *([probe_timer] if cfg.triage_service else []),
+        activate = [f"{cfg.unit}.timer", *([probe_timer] if probe_on else []),
                     *([dash_unit] if args.dashboard else [])]
         print(f"activate explicitly with: systemctl --user enable --now {' '.join(activate)}")
         return 0
@@ -1231,12 +1280,12 @@ def install(argv: list[str]) -> int:
     if timer in changed:
         systemctl("restart", timer)
     print(f"{'restarted' if timer in changed else 'started'} {timer}")
-    if cfg.triage_service:
+    if probe_on:
         systemctl("enable", "--now", probe_timer)
         if probe_timer in changed:
             systemctl("restart", probe_timer)
         print(f"{'restarted' if probe_timer in changed else 'started'} {probe_timer}")
-    if cfg.eval_schedule:
+    if eval_on:
         systemctl("enable", "--now", eval_timer)
         if eval_timer in changed:
             systemctl("restart", eval_timer)
@@ -1249,9 +1298,9 @@ def install(argv: list[str]) -> int:
     if sh(["loginctl", "show-user", "--property=Linger", "--value", Path.home().name]).stdout.strip() != "yes":
         print("hint: `loginctl enable-linger` keeps user timers running after logout and at boot")
     enabled = [f"{cfg.unit}.timer"]
-    if cfg.triage_service:
+    if probe_on:
         enabled.append(probe_timer)
-    if cfg.eval_schedule:
+    if eval_on:
         enabled.append(eval_timer)
     if args.dashboard:
         enabled.append(dash_unit)

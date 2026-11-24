@@ -15,7 +15,7 @@ from unittest.mock import MagicMock, patch
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from factory import config, dashboard, onboard
+from factory import config, dashboard, onboard, triage
 
 
 class FactoryDirSafetyTest(unittest.TestCase):
@@ -61,7 +61,7 @@ class FactoryDirSafetyTest(unittest.TestCase):
             ),
             patch.object(onboard, "sh", side_effect=command),
             patch.object(onboard.shutil, "which", return_value="/bin/tool"),
-            patch.object(onboard.urllib.request, "urlopen", return_value=MagicMock()),
+            patch.object(triage.urllib.request, "urlopen", return_value=MagicMock()),
             redirect_stdout(out),
         ):
             onboard.doctor(["--json"])
