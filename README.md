@@ -107,7 +107,9 @@ starts as it ends (success or failure), so an approved merge deploys in the cycl
 merged it, with no operator step. The pass unit is ordered after it, so a timer firing
 during a long apply waits for it to finish. The apply unit is never enabled and has no
 timer: stopping the pass timer also stops applies. Host-owned `[install].apply = false`
-renders neither the unit nor the trigger, leaving `factory apply` to the operator; see
+renders neither the unit nor the trigger, leaving `factory apply` to the operator.
+On a host that only deploys, host-owned `[install].dispatch = false` drops the pass unit
+and the timer starts the apply unit directly; see
 [deployment lifecycle](docs/deployment-lifecycle.md#scheduling).
 
 Generated triage, triage-probe, dispatch, apply and dashboard services use the interpreter
@@ -157,6 +159,13 @@ ticket exit, so it cannot affect later refresh or manager FIX pushes.
 No other ref is force-pushed.
 Review-request opt-in accepts requests naming either the dispatcher's or the
 dashboard's login.
+
+`verify-secrets` and `inspect` compare each unit against its rendered role:
+dispatcher and apply use `[install].env` plus `[install].dispatch_env`, while
+the dashboard uses `[install].env`. Dispatch-only keys are checked too; a valid
+override does not require reinstalling the unit. Inspection applies the same
+comparison to configured, effective and running-process environments and retains
+the separate adapter credential-isolation checks.
 
 `factory apply` and `factory incidents --deliver/--retry` act on GitHub as that same
 dispatcher identity, whether the apply unit or an operator shell runs them, and only

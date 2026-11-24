@@ -430,9 +430,11 @@ def replay_ticket(
                 f"Ticket #{case.ticket} is replayed at recorded base `{case.base}`. "
                 "Judge only this diff and the gate report above."
             )
+            packet, _ = dispatch._review_packet(wt, gate_head, base)
+            prompt = dispatch.review_prompt(case.ticket, review_report, context=context)
             result = dispatch.run_reviewer(
                 wt,
-                dispatch.review_prompt(case.ticket, review_report, context=context),
+                f"{prompt}\n\n{packet}",
                 gate_head,
                 base_ref=base,
                 env=isolated,
@@ -881,9 +883,10 @@ def chore_pr(
             if ok and _pr_checks(wt):
                 ok, pr_report = dispatch.run_gate(wt, f"{name}-pr", tier="pr", base=base)
                 report = f"{report}\n{pr_report}"
+            packet, _ = dispatch._review_packet(wt, head, base)
             result = dispatch.run_reviewer(
                 wt,
-                dispatch.review_prompt(None, report, proposal=pr_body),
+                f"{dispatch.review_prompt(None, report, proposal=pr_body)}\n\n{packet}",
                 head,
                 base_ref=base,
                 subject=f"learn candidate {branch}",

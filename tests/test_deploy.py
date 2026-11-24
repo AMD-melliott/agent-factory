@@ -1165,7 +1165,7 @@ class ReviewDefectsRegressionTest(unittest.TestCase):
                  mock.patch.object(dispatch, "run", run_mock), \
                  mock.patch.object(dispatch, "pr_comment", pr_comment_mock), \
                  mock.patch.object(apply, "fetch_all_merged_prs", return_value=[pr_skip, pr_fail]), \
-                 mock.patch.object(apply, "touches_apply_dir", side_effect=lambda c: c == "c11"), \
+                 mock.patch.object(apply, "touches_apply_dir", side_effect=lambda c, *_: c == "c11"), \
                  mock.patch.object(deploy, "get_adapter", return_value=fake_adapter):
                 apply.main(["--dry-run"])
 
@@ -2051,7 +2051,7 @@ dir = "terraform"
         with mock.patch.object(config, "load", return_value=cfg), \
              mock.patch.object(dispatch, "run") as run, \
              mock.patch.object(apply, "fetch_all_merged_prs", return_value=prs[::-1]), \
-             mock.patch.object(apply, "touches_target_dir", side_effect=lambda c, d: d == "deploy/app"), \
+             mock.patch.object(apply, "touches_target_dir", side_effect=lambda c, d, *_: d == "deploy/app"), \
              mock.patch.object(apply, "apply_one", side_effect=fake_apply_one) as apply_one:
             ret = apply.main(list(args))
         return ret, apply_one, run
